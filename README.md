@@ -1,5 +1,6 @@
-# SAR-YOLO
-SAR-YOLO: Parallel Detection and Posture Recognition of Ultra-small Person for UAV-based Search and Rescue
+# SaR-YOLO
+SaR-YOLO: Task-Decoupled Person Detection and Posture Recognition for UAV-based Search and Rescue
+
 
 # Dataset
 Click [here](https://ieee-dataport.org/documents/search-and-rescue-image-dataset-person-detection-sard) to download the SARD dataset.

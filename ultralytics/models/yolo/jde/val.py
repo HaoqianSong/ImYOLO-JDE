@@ -74,6 +74,119 @@ class JDEValidator(DetectionValidator):
             "target_cls": [],
             "target_img": [],
         }
+        # ========== 新增：按目标尺寸统计检测/状态检测 ==========
+        self._init_size_buckets()
+    # ========== 新增：按目标尺寸统计检测/状态检测 ==========
+    def _init_size_buckets(self):
+        
+        # 初始化尺寸分桶定义，并重置统计计数。
+        # 尺寸单位：原图像素，按 GT 框的宽和高同时落入区间来划分。
+        
+        # (lo, hi]: 左开右闭区间；第一个区间 lo=0 时等价于 <=hi
+        self.size_bins = [
+            (0, 16),
+            (16, 24),
+            (24, 32),
+            (32, 40),
+            (40, 48),
+            (48, 56),
+            (56, 64),
+            (64, 72),
+            (72, 80),
+            (80, 88),
+            (88, 96),
+            (96, 112),
+            (112, 128),
+            (128, 192),
+            (192, float("inf")),
+        ]
+        self.size_bucket_names = [
+            "<=16",
+            "16-24",
+            "24-32",
+            "32-40",
+            "32-48",
+            "48-56",
+            "56-64",
+            "64-72",
+            "72-80",
+            "80-88",
+            "88-96",
+            "96-112",
+            "112-128",
+            "128-192",
+            ">192",
+        ]
+        """
+        self.size_bins = [
+            (0, 20),
+            (20, 25),
+            (25, 30),
+            (30, 35),
+            (35, 60),
+            (60, float("inf")),
+        ]
+        self.size_bucket_names = [
+            "<=20",
+            "20-25",
+            "25-30",
+            "30-35",
+            "35-60",
+            ">60",
+        ]
+        """
+        # 初始化尺寸分桶定义：改为按目标像素面积分桶。
+        # 面积单位：原图上的像素数（w*h）。
+        # 分桶：
+        # 0: area < 20
+        # 1: 20 <= area <= 50
+        # #2: area > 50
+        """
+        # 这里的 (lo, hi) 只是保存阈值，真正的比较逻辑在 update_metrics 里单独写
+        self.size_bins = [
+            (0.0, 200.0),             # area < 20
+            (200.0, 300.0),
+            (300.0, 400.0),
+            (400.0, 500.0),
+            (500.0, 1000.0),
+            (1000.0, 1500.0),
+            (1500.0, 2000.0),
+            (2000.0, 2500.0),
+            (2500.0, 3000.0),
+            (3000.0, 3500.0),
+            (3500.0, 4000.0),
+            (4000.0, 4500.0),
+            (4500.0, 5000.0),
+            (5000.0, float("inf")),    # area > 50
+        ]
+        self.size_bucket_names = [
+            "<=200",
+            "200-300",
+            "300-400",
+            "400-500",
+            "500-1000",
+            "1000-1500",
+            "1500-2000",
+            "2000-2500",
+            "2500-3000",
+            "3000-3500",
+            "3500-4000",
+            "4000-4500",
+            "4500-5000",
+            ">5000",
+        ]"""
+        self._reset_size_bucket_counters()
+    # ========== 新增：按目标尺寸统计检测/状态检测 ==========
+    def _reset_size_bucket_counters(self):
+        """每次验证前重置按尺寸的统计结果。"""
+        # 检测（box）按尺寸统计
+        self.size_det_counts = [
+            {"gt": 0, "tp": 0, "pred": 0} for _ in self.size_bins
+        ]
+        # 状态检测按尺寸统计
+        self.size_state_det_counts = [
+            {"gt": 0, "tp": 0, "pred": 0} for _ in self.size_bins
+        ]
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
@@ -95,6 +208,9 @@ class JDEValidator(DetectionValidator):
         
         # 确保在这里完成 state_metrics 的初始化 #$$$$$$$$$$$$$#  #&#初始化不能访问model替换
         self._ensure_state_metrics_initialized()#$$$$$$$$$$$$$# #&#初始化不能访问model替换
+
+        # ========== 新增：每次验证前重置尺寸统计 ==========
+        self._reset_size_bucket_counters()
 
         stats = super().__call__(trainer, model)
         return stats
@@ -143,54 +259,29 @@ class JDEValidator(DetectionValidator):
         """修改后的_prepare_pred函数，与predict.py保持一致"""
         predn = pred.clone()
         # 使用与predict.py完全相同的参数调用scale_boxes
-        ops.scale_boxes(pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"], padding=True)
+        ops.scale_boxes(pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"])
         return predn
     def build_dataset(self, img_path, mode="val", batch=None):
-        """Build YOLO Dataset with predict-consistent transforms."""
         from ultralytics.data import YOLODataset
-        from ultralytics.data.augment import LetterBox, Format, Compose
-        
-        # 创建数据集
+
         dataset = YOLODataset(
             img_path=img_path,
             imgsz=self.args.imgsz,
             batch_size=batch,
             augment=False,
             hyp=self.args,
-            rect=False,  # ← 强制禁用rect模式，与predict一致
+            rect=True,                   # 与 Detect val 一致
             cache=self.args.cache or None,
             single_cls=self.args.single_cls or False,
             stride=int(self.stride),
-            pad=0.0,  # ← 改为0.0，与predict一致（predict不使用padding）
+            pad=0.5,                     # 与 Detect val 一致
             prefix=f"{mode}: ",
             task=self.args.task,
             classes=self.args.classes,
             data=self.data,
             fraction=1.0,
         )
-        
-        # 覆盖transforms，使用与predict一致的LetterBox参数
-        transforms = Compose([LetterBox(
-            new_shape=(self.args.imgsz, self.args.imgsz),
-            auto=True,      # 与predict一致
-            scaleup=True,   # 与predict一致
-            stride=int(self.stride),
-        )])
-        transforms.append(
-            Format(
-                bbox_format="xywh",
-                normalize=True,
-                return_mask=False,
-                return_keypoint=False,
-                return_obb=False,
-                batch_idx=True,
-                mask_ratio=self.args.mask_ratio,
-                mask_overlap=self.args.overlap_mask,
-                bgr=0.0,
-            )
-        )
-        dataset.transforms = transforms
-        
+        # 不再覆写 dataset.transforms，沿用框架在 val 下的默认 transforms
         return dataset
     def update_metrics(self, preds, batch):
         """Metrics."""
@@ -214,6 +305,70 @@ class JDEValidator(DetectionValidator):
             nl = len(cls)
             stat["target_cls"] = cls
             stat["target_img"] = cls.unique()
+
+            # ========== 新增：为每个 GT 目标打上尺寸桶标签，并统计 GT 数量 ==========
+            gt_size_bucket = None
+            if nl:
+                # bbox 为 xyxy（像素坐标）
+                wh = bbox[:, 2:4] - bbox[:, 0:2]  # (nl, 2)
+                w, h = wh[:, 0], wh[:, 1]
+                gt_size_bucket = torch.full((nl,), -1, dtype=torch.long, device=self.device)
+                # 使用 max(w, h) 来决定每个目标属于哪个尺寸桶（避免一个目标被分到多个桶）
+                max_dim = torch.max(w, h)  # (nl,)
+                for bi, (lo, hi) in enumerate(self.size_bins):
+                    # 第一个桶 (0, 12] 等价于 w<=12, h<=12
+                    if lo == 0:
+                        mask = max_dim <= hi
+                    else:
+                        mask = (max_dim > lo) & (max_dim <= hi)
+                    # 只给还没有分配桶的目标分配（避免覆盖）
+                    unassigned = gt_size_bucket == -1
+                    gt_size_bucket[mask & unassigned] = bi
+
+                # 按尺寸桶累计 GT 数量（检测 + 状态检测共用同一 GT）
+                for bi in range(len(self.size_bins)):
+                    cnt = int((gt_size_bucket == bi).sum().item())
+                    if cnt > 0:
+                        self.size_det_counts[bi]["gt"] += cnt
+                        self.size_state_det_counts[bi]["gt"] += cnt  # ========== 新增：按目标尺寸统计检测/状态检测 ==========
+            """
+            # ========== 为每个 GT 目标按“像素面积”打尺寸桶标签，并统计 GT 数量 ==========
+            gt_size_bucket = None
+            if nl:
+                # bbox 为 xyxy（像素坐标）
+                wh = bbox[:, 2:4] - bbox[:, 0:2]  # (nl, 2)
+                w, h = wh[:, 0], wh[:, 1]
+                area = w * h  # 每个GT框的像素面积
+
+                gt_size_bucket = torch.full((nl,), -1, dtype=torch.long, device=self.device)
+
+                for bi, (lo, hi) in enumerate(self.size_bins):
+                    # 三个桶：
+                    #  0: area < 20      -> (0.0, 20.0)
+                    #  1: 20 <= area <= 50 -> (20.0, 50.0)
+                    #  2: area > 50      -> (50.0, inf)
+                    if bi == 0:
+                        # 面积 < hi  ( <20 )
+                        mask = area <= hi
+                    elif hi == float("inf"):
+                        # 面积 > lo  ( >50 )
+                        mask = area > lo
+                    else:
+                        # lo <= area <= hi  (20~50)
+                        mask = (area > lo) & (area <= hi)
+
+                    # 只给还没分桶的 GT 赋值，避免重复
+                    unassigned = gt_size_bucket == -1
+                    gt_size_bucket[mask & unassigned] = bi
+
+                # 按尺寸桶累计 GT 数量（检测 + 状态检测共用同一 GT）
+                for bi in range(len(self.size_bins)):
+                    cnt = int((gt_size_bucket == bi).sum().item())
+                    if cnt > 0:
+                        self.size_det_counts[bi]["gt"] += cnt
+                        self.size_state_det_counts[bi]["gt"] += cnt # ========== 为每个 GT 目标按“像素面积”打尺寸桶标签，并统计 GT 数量 ==========
+            """
+
             if npr == 0:
                 if nl:
                     for k in self.stats.keys():
@@ -240,6 +395,36 @@ class JDEValidator(DetectionValidator):
                 self.stats[k].append(stat[k])
             batch_matched_tags.append(matched_tags)
 
+            # ========== 新增：按尺寸统计“检测” TP（IoU=self.state_iou，类别正确） ==========
+            # 在 match_predictions 中，我们会在 IoU==self.state_iou 时缓存当前 (gt_idx, pred_idx) 匹配到 self.last_matches
+            if nl and gt_size_bucket is not None and hasattr(self, "last_matches") and self.last_matches is not None:
+                # self.last_matches: numpy 数组，形状 (K, 2)，每行 [gt_idx, pred_idx]
+                matched_gt_idx = set(int(g) for g in np.unique(self.last_matches[:, 0]))
+                for gt_idx in matched_gt_idx:
+                    if 0 <= gt_idx < nl:
+                        bi = int(gt_size_bucket[gt_idx].item())
+                        if bi >= 0:
+                            self.size_det_counts[bi]["tp"] += 1  # ========== 新增：按尺寸统计“检测” TP（IoU=self.state_iou，类别正确） ==========
+
+            # ========== 新增：按尺寸统计“检测”预测数量，用于计算precision ==========
+            if npr > 0 and nl > 0 and gt_size_bucket is not None:
+                # 计算 GT 与预测的 IoU 矩阵
+                iou_matrix = box_iou(bbox, predn[:, :4])  # (nl, npr)
+
+                for pred_i in range(npr):
+                    # 找到与该预测 IoU 最大的 GT
+                    ious = iou_matrix[:, pred_i]
+                    max_iou, gt_idx_max = torch.max(ious, dim=0)
+                    if max_iou <= 0:
+                        # 与任何 GT 都没有重叠，不归入任何尺寸桶（这样 P 会略微偏高一点）
+                        continue
+                    gt_idx_use = int(gt_idx_max)
+                    bi = int(gt_size_bucket[gt_idx_use].item())
+                    if bi < 0:
+                        continue
+                    self.size_det_counts[bi]["pred"] += 1  # ========== 新增：按尺寸统计“检测”预测数量，用于计算precision ==========
+
+
             # ========== 状态检测指标计算（复用检测指标代码，完全替换类别和置信度）==========
             # ========== 状态检测指标计算（复用检测指标代码，完全替换类别和置信度）==========
             if hasattr(self, "state_det_stats") and hasattr(self.model.model[-1], "state_classes") and self.model.model[-1].state_classes is not None:
@@ -260,7 +445,7 @@ class JDEValidator(DetectionValidator):
                     
                     # 构造"状态检测"的预测矩阵：使用predn的bbox，替换conf和cls为状态相关的
                     pred_state_det = predn.clone()
-                    pred_state_det[:, 4] = det_conf  # 使用检测框置信度
+                    pred_state_det[:, 4] = det_conf * (state_conf ** 12)   # 之前的结果都 使用检测框置信度det_conf
                     pred_state_det[:, 5] = state_cls.float()  # 替换类别为状态类别
                     
                     # 用"状态id"作为GT类别（tags是0-based，0-5对应6个状态）
@@ -301,6 +486,34 @@ class JDEValidator(DetectionValidator):
                         
                         for k in self.state_det_stats.keys():
                             self.state_det_stats[k].append(state_stat[k])
+
+                        # ========== 新增：按尺寸统计“状态检测” TP（IoU=self.state_iou，状态类别正确） ==========
+                        # 此时 match_predictions 再次被调用（用于状态检测），self.last_matches 对应的是状态检测的匹配
+                        if nl and gt_size_bucket is not None and hasattr(self, "last_matches") and self.last_matches is not None:
+                            matched_gt_idx = set(int(g) for g in np.unique(self.last_matches[:, 0]))
+                            for gt_idx in matched_gt_idx:
+                                if 0 <= gt_idx < nl:
+                                    bi = int(gt_size_bucket[gt_idx].item())
+                                    if bi >= 0:
+                                        self.size_state_det_counts[bi]["tp"] += 1 # ========== 新增：按尺寸统计“状态检测” TP（IoU=self.state_iou，状态类别正确） ==========
+                        # ========== 新增：按尺寸统计“状态检测”预测数量，用于计算precision ==========
+                        if pred_state_det.numel() > 0 and nl > 0 and gt_size_bucket is not None:
+                            # 计算 GT 与状态检测预测框的 IoU 矩阵
+                            iou_matrix_state = box_iou(bbox, pred_state_det[:, :4])  # (nl, N_pred)
+
+                            for pred_i in range(len(pred_state_det)):
+                                ious = iou_matrix_state[:, pred_i]
+                                max_iou, gt_idx_max = torch.max(ious, dim=0)
+                                if max_iou <= 0:
+                                    # 与任何 GT 都没有重叠，不归入任何尺寸桶
+                                    continue
+                                gt_idx_use = int(gt_idx_max)
+                                bi = int(gt_size_bucket[gt_idx_use].item())
+                                if bi < 0:
+                                    continue
+                                self.size_state_det_counts[bi]["pred"] += 1 # ========== 新增：按尺寸统计“状态检测”预测数量，用于计算precision ==========
+
+
                     elif len(gt_state_cls) > 0:
                         # 只有GT没有预测的情况
                         state_stat = dict(
@@ -650,8 +863,8 @@ class JDEValidator(DetectionValidator):
             self.args.conf,
             self.args.iou,
             labels=self.lb,
-            multi_label=False,  # ← 改为False，与predict一致
-            agnostic=self.args.agnostic_nms,  # ← 简化，与predict一致
+            multi_label=True,  # multi_label=True 与 Detect 验证器一致
+            agnostic=self.args.single_cls or self.args.agnostic_nms, # ← 与 Detect 验证器一致
             max_det=self.args.max_det,
             nc=self.nc,
             classes=self.args.classes,  # ← 添加classes参数，与predict一致
@@ -694,6 +907,11 @@ class JDEValidator(DetectionValidator):
         Returns:
             (torch.Tensor): Correct tensor of shape(N,10) for 10 IoU thresholds.
         """
+        # =================== 新增：每次调用时重置尺寸统计用的匹配缓存  ==================
+        # 将在 IoU == self.state_iou 时保存当前 (gt_idx, pred_idx) 匹配
+        self.last_matches = None # ===================
+
+
         # Initialize the list for storing matched tags using IoU threshold of 0.5
         matched_tags = [False] * pred_classes.shape[0]  # Default to None if no match
 
@@ -716,6 +934,11 @@ class JDEValidator(DetectionValidator):
                         correct[detections_idx[valid], i] = True
                         # Assign tags to matched predictions
                         if threshold == self.state_iou:  #￥#￥#￥#￥#￥#￥#
+
+                            # ================== 新增： 缓存 (gt_idx, pred_idx) 匹配，用于尺寸统计  ==================
+                            matches_np = np.stack([labels_idx[valid], detections_idx[valid]], axis=1)
+                            self.last_matches = matches_np # ==================
+
                             for gt_idx, pred_idx in zip(labels_idx[valid], detections_idx[valid]):
                                 matched_tags[pred_idx] = true_tags[gt_idx].item()
             else:
@@ -730,6 +953,10 @@ class JDEValidator(DetectionValidator):
                     correct[matches[:, 1].astype(int), i] = True
                     # Assign tags to matched predictions
                     if threshold == self.state_iou:  #￥#￥#￥#￥#￥#￥#
+                        
+                        # ================== 新增： 缓存 (gt_idx, pred_idx) 匹配，用于尺寸统计  ==================
+                        self.last_matches = matches.copy() # ==================
+
                         for gt_idx, pred_idx in matches:
                             if true_tags.dim() > 0: #$#$#
                                 matched_tags[pred_idx] = true_tags[gt_idx].item()
@@ -845,6 +1072,24 @@ class JDEValidator(DetectionValidator):
                 self.state_det_metrics.names = state_names  # 设置名称
                 self.state_det_metrics.process(**state_det_stats_copy)
                 
+                # 打印表头
+                LOGGER.info("")
+                LOGGER.info("State Detection Results:")
+                pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.state_det_metrics.keys)
+                
+                # 打印总体结果
+                total_images = len(set().union(*self.state_class_images.values())) if hasattr(self, 'state_class_images') and self.state_class_images else self.seen
+                LOGGER.info(pf % ("all", total_images, int(self.state_nt_per_class.sum()), *self.state_det_metrics.mean_results()))
+                
+                # 打印每个类别的结果
+                if self.args.verbose and not self.training and state_classes > 1:
+                    for i, c in enumerate(self.state_det_metrics.ap_class_index):
+                        cls_name = state_names.get(c, f"state_{c}")
+                        LOGGER.info(
+                            pf % (cls_name, self.state_nt_per_image[c], self.state_nt_per_class[c], 
+                                *self.state_det_metrics.class_result(i))
+                        )
+                
                 # 恢复原始设置
                 self.nc = original_nc
                 self.nt_per_class = original_nt_per_class
@@ -865,6 +1110,45 @@ class JDEValidator(DetectionValidator):
             )
         else:
             LOGGER.info("No state prediction data available for evaluation")
+        
+        # ========== 按目标尺寸统计的检测/状态检测结果（基于 IoU=self.state_iou），增加P、FP、FN ==========
+        if hasattr(self, "size_bins"):
+            LOGGER.info("")
+            LOGGER.info("Per-size Detection / State-Detection Metrics (IoU=%.2f):" % self.state_iou)
+            # 表头：增加 FP 和 FN 列
+            header = "%10s%8s%8s%8s%8s%8s%8s%8s%8s%8s%8s%8s%8s"
+            LOGGER.info(header % (
+                "size", "det_GT", "det_TP", "det_FP", "det_FN",
+                "st_GT", "st_TP", "st_FP", "st_FN",
+                "det_P", "det_R", "st_P", "st_R"
+            ))
+            
+            for bi, (rng, name) in enumerate(zip(self.size_bins, self.size_bucket_names)):
+                det_c = self.size_det_counts[bi]
+                st_c = self.size_state_det_counts[bi]
+                det_gt, det_tp = det_c["gt"], det_c["tp"]
+                st_gt, st_tp = st_c["gt"], st_c["tp"]
+                det_pred = det_c.get("pred", 0)
+                st_pred = st_c.get("pred", 0)
+
+                # 计算 FP 和 FN
+                det_fp = det_pred - det_tp  # FP = 预测数 - TP
+                det_fn = det_gt - det_tp   # FN = GT数 - TP
+                st_fp = st_pred - st_tp
+                st_fn = st_gt - st_tp
+
+                # 计算 P 和 R
+                det_rec = det_tp / det_gt if det_gt > 0 else 0.0
+                st_rec = st_tp / st_gt if st_gt > 0 else 0.0
+                det_prec = det_tp / det_pred if det_pred > 0 else 0.0
+                st_prec = st_tp / st_pred if st_pred > 0 else 0.0
+
+                LOGGER.info(
+                    f"{name:>10s}{det_gt:8d}{det_tp:8d}{det_fp:8d}{det_fn:8d}  "
+                    f"{st_gt:8d}{st_tp:8d}{st_fp:8d}{st_fn:8d}  "
+                    f"{det_prec:8.3f}{det_rec:8.3f}{st_prec:8.3f}{st_rec:8.3f}"
+                ) # ========== 按目标尺寸统计的检测/状态检测结果（基于 IoU=self.state_iou），增加P、FP、FN ==========
+
 
         # 保存Excel的逻辑
         save_excel = getattr(self, '_save_excel', False)
@@ -992,16 +1276,16 @@ class JDEValidator(DetectionValidator):
                 row_data['State_Macro_Accuracy'] = 0.0
             
             # 第11-13列：State Prediction Metrics (P, R, F1)
-            if self.state_metrics is not None and self.state_metrics.total > 0:
-                self.state_metrics.update_formatted_metrics()
-                state_pred_results = self.state_metrics.mean_results()  # [mp, mr, mf1, 0, 0]
-                row_data['State_Pred_P'] = round(float(state_pred_results[0]), 3) if len(state_pred_results) > 0 else 0.0
-                row_data['State_Pred_R'] = round(float(state_pred_results[1]), 3) if len(state_pred_results) > 1 else 0.0
-                row_data['State_Pred_F1'] = round(float(state_pred_results[2]), 3) if len(state_pred_results) > 2 else 0.0
-            else:
-                row_data['State_Pred_P'] = 0.0
-                row_data['State_Pred_R'] = 0.0
-                row_data['State_Pred_F1'] = 0.0
+            # if self.state_metrics is not None and self.state_metrics.total > 0:
+            #     self.state_metrics.update_formatted_metrics()
+            #     state_pred_results = self.state_metrics.mean_results()  # [mp, mr, mf1, 0, 0]
+            #     row_data['State_Pred_P'] = round(float(state_pred_results[0]), 3) if len(state_pred_results) > 0 else 0.0
+            #     row_data['State_Pred_R'] = round(float(state_pred_results[1]), 3) if len(state_pred_results) > 1 else 0.0
+            #     row_data['State_Pred_F1'] = round(float(state_pred_results[2]), 3) if len(state_pred_results) > 2 else 0.0
+            # else:
+            #     row_data['State_Pred_P'] = 0.0
+            #     row_data['State_Pred_R'] = 0.0
+            #     row_data['State_Pred_F1'] = 0.0
             
             # 第14-18列：State Detection Metrics (pre, rec, mAP50, mAP75, mAP50-95)
             if hasattr(self, "state_det_metrics") and hasattr(self, "state_det_stats") and len(self.state_det_stats) > 0:

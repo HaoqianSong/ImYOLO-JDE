@@ -1,4 +1,4 @@
-# SaR-YOLO
+# Improved YOLO-JDE
 Improved YOLO-JDE: Joint Person Detection and Posture Recognition for UAV Search and Rescue Urgency Assessment
 
 
